@@ -1,0 +1,1059 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import {
+  AuditLog,
+  AssignmentHistory,
+  ChatMessage,
+  Conversation,
+  ConversationParticipant,
+  DailyUpdate,
+  EntityDocument,
+  Escalation,
+  FeasibilityEmployeeAllocation,
+  FeasibilityTeamAssignment,
+  ForumComment,
+  ForumLiveMessage,
+  ForumPost,
+  ForumReaction,
+  ForumTag,
+  Lead,
+  LeadActivity,
+  LeadComment,
+  LeadDocument,
+  LeadStatusHistory,
+  NotificationDelivery,
+  NotificationItem,
+  OutboundEmail,
+  PendingSignup,
+  ProcurementRequest,
+  Project,
+  ProjectPhase,
+  Role,
+  StageTransition,
+  Task,
+  Team,
+  User,
+} from '../types.js';
+import { INITIAL_ROLES, INITIAL_TEAMS, INITIAL_USERS } from '../data/seed.js';
+import {
+  COLLECTION_NAMES,
+  CollectionName,
+  closePool,
+  ensureSchema,
+  loadAllCollections,
+  pingDatabase,
+  saveAllCollections,
+} from './postgres.js';
+import { isSmokeTestAccount } from '../lib/smokeTestAccounts.js';
+
+interface DbShape {
+  users: User[];
+  roles: Role[];
+  teams: Team[];
+  leads: Lead[];
+  projects: Project[];
+  escalations: Escalation[];
+  procurementRequests: ProcurementRequest[];
+  audits: AuditLog[];
+  notifications: NotificationItem[];
+  tasks: Task[];
+  dailyUpdates: DailyUpdate[];
+  leadDocuments: LeadDocument[];
+  leadComments: LeadComment[];
+  leadActivities: LeadActivity[];
+  leadStatusHistory: LeadStatusHistory[];
+  feasibilityTeamAssignments: FeasibilityTeamAssignment[];
+  feasibilityEmployeeAllocations: FeasibilityEmployeeAllocation[];
+  projectPhases: ProjectPhase[];
+  conversations: Conversation[];
+  conversationParticipants: ConversationParticipant[];
+  chatMessages: ChatMessage[];
+  entityDocuments: EntityDocument[];
+  stageTransitions: StageTransition[];
+  outboundEmails: OutboundEmail[];
+  forumPosts: ForumPost[];
+  forumComments: ForumComment[];
+  forumReactions: ForumReaction[];
+  forumTags: ForumTag[];
+  forumLiveMessages: ForumLiveMessage[];
+  assignmentHistory: AssignmentHistory[];
+  notificationDeliveries: NotificationDelivery[];
+  pendingSignups: PendingSignup[];
+  systemMeta: SystemMetaRecord[];
+}
+
+interface SystemMetaRecord {
+  id: string;
+  demoOperationalPurgedAt?: string;
+  usersLeadershipPrunedAt?: string;
+  payloadType?: string;
+  payload?: unknown;
+}
+
+const LIVE_META_ID = 'pms-live';
+const LEADERSHIP_PRUNE_META_ID = 'users-keep-leadership-v1';
+
+const OPERATIONAL_COLLECTION_KEYS = [
+  'leads',
+  'projects',
+  'escalations',
+  'procurementRequests',
+  'audits',
+  'notifications',
+  'tasks',
+  'dailyUpdates',
+  'leadDocuments',
+  'leadComments',
+  'leadActivities',
+  'leadStatusHistory',
+  'feasibilityTeamAssignments',
+  'feasibilityEmployeeAllocations',
+  'projectPhases',
+  'conversations',
+  'conversationParticipants',
+  'chatMessages',
+  'entityDocuments',
+  'stageTransitions',
+  'outboundEmails',
+  'forumPosts',
+  'forumComments',
+  'forumReactions',
+  'forumTags',
+  'forumLiveMessages',
+  'assignmentHistory',
+  'notificationDeliveries',
+] as const;
+
+const localDbPath = path.join(process.cwd(), 'data', 'db.json');
+
+let cache: DbShape | null = null;
+let writeChain: Promise<void> = Promise.resolve();
+let persistPaused = false;
+let initialized = false;
+let mutex: Promise<void> = Promise.resolve();
+const dirtyCollections = new Set<CollectionName>();
+
+function markDirty(...names: CollectionName[]) {
+  for (const name of names) dirtyCollections.add(name);
+}
+
+function takeDirty(): CollectionName[] {
+  const names = [...dirtyCollections];
+  dirtyCollections.clear();
+  return names;
+}
+
+function snapshotDb(db: DbShape): DbShape {
+  const snap: Record<string, unknown> = {};
+  for (const key of Object.keys(db) as (keyof DbShape)[]) {
+    const value = db[key];
+    snap[key as string] = Array.isArray(value) ? value.slice() : structuredClone(value);
+  }
+  return snap as unknown as DbShape;
+}
+
+function isDemoOperationalPurged(parsed: Partial<DbShape>): boolean {
+  return (parsed.systemMeta ?? []).some((item) => item.id === LIVE_META_ID && Boolean(item.demoOperationalPurgedAt));
+}
+
+function hasOperationalRecords(parsed: Partial<DbShape>): boolean {
+  return OPERATIONAL_COLLECTION_KEYS.some((key) => {
+    const value = parsed[key];
+    return Array.isArray(value) && value.length > 0;
+  });
+}
+
+function withPurgedOperationalData(parsed: Partial<DbShape>): Partial<DbShape> {
+  const next: Partial<DbShape> = { ...parsed };
+  for (const key of OPERATIONAL_COLLECTION_KEYS) {
+    next[key] = [];
+  }
+  next.systemMeta = [
+    ...(parsed.systemMeta ?? []).filter((item) => item.id !== LIVE_META_ID),
+    { id: LIVE_META_ID, demoOperationalPurgedAt: new Date().toISOString() },
+  ];
+  return next;
+}
+
+function prepareLiveOperationalData(parsed: Partial<DbShape>): Partial<DbShape> {
+  if (isDemoOperationalPurged(parsed)) return parsed;
+  if (hasOperationalRecords(parsed)) {
+    console.info('[store] Purging demo/sample operational collections for live production');
+  }
+  return withPurgedOperationalData(parsed);
+}
+
+function mergeById<T extends { id: string }>(stored: T[] | undefined, seed: T[]): T[] {
+  const current = stored ?? [];
+  const known = new Set(current.map((item) => item.id));
+  return [...current, ...seed.filter((item) => !known.has(item.id))];
+}
+
+const SEED_USER_IDS = new Set(INITIAL_USERS.map((user) => user.id));
+
+const RETIRED_DEMO_USER_IDS = new Set([
+  'u-ceo',
+  'u-bh',
+  'u-ed',
+  'u-robotlead1',
+  'u-emp-sw',
+  'u-emp-sw-2',
+  'u-emp-sw-3',
+  'u-emp-vis-1',
+  'u-emp-vis-2',
+  'u-emp-rob-1',
+  'u-emp-rob-2',
+  'u-emp-rob-3',
+  'u-emp-rob-4',
+  'u-tl-proc',
+  'u-emp-proc-1',
+  'u-emp-proc-2',
+  'u-tl-exec',
+  'u-emp-exec-1',
+  'u-emp-exec-2',
+  'u-emp-exec-3',
+  'u-emp-exec-4',
+  'u-emp-exec-5',
+]);
+
+const RETIRED_DEMO_EMAILS = new Set([
+  'bernard.hamilton@careyu.com',
+  'shradha.patil@careyu.com',
+  'sabarigiri.t@careyu.com',
+  'karthik@careyu.com',
+  'deepak@careyu.com',
+  'meena@careyu.com',
+  'sanjay@careyu.com',
+  'lakshmi@careyu.com',
+  'rahul@careyu.com',
+  'divya@careyu.com',
+  'vikram@careyu.com',
+  'nisha@careyu.com',
+  'suresh@careyu.com',
+  'anitha@careyu.com',
+  'manoj@careyu.com',
+  'ramesh@careyu.com',
+  'gopal@careyu.com',
+  'sita@careyu.com',
+  'farhan@careyu.com',
+  'kavya@careyu.com',
+  'imran@careyu.com',
+  'aakash@careyu.com',
+]);
+
+function isIncompleteSignupAccount(user: User): boolean {
+  if (SEED_USER_IDS.has(user.id)) return false;
+  if (user.password_hash) return false;
+  const status = user.account_status;
+  if (
+    status === 'INVITED' ||
+    status === 'INVITATION_VERIFIED' ||
+    status === 'PASSWORD_SETUP_REQUIRED' ||
+    status === 'INVITATION_EXPIRED'
+  ) {
+    return true;
+  }
+  return Boolean(user.invitation_code_hash);
+}
+
+function stripIncompleteSignupUsers(users: User[]): User[] {
+  return users.filter((user) => !isIncompleteSignupAccount(user));
+}
+
+function mergeUsers(stored: User[] | undefined, seed: User[]): User[] {
+  const current = stored ?? [];
+  const ids = new Set(current.map((user) => user.id));
+  const emails = new Set(current.map((user) => user.email.trim().toLowerCase()));
+  const roles = new Set(current.map((user) => user.role_code));
+  const extra = seed.filter((item) => {
+    if (ids.has(item.id) || emails.has(item.email.trim().toLowerCase())) return false;
+    if (['CEO', 'BUSINESS_HEAD', 'ENG_DIRECTOR'].includes(item.role_code) && roles.has(item.role_code)) {
+      return false;
+    }
+    return true;
+  });
+  const namedRoster = new Set(['u-ceo', 'u-bh', 'u-ed']);
+  const merged = [...current, ...extra].map((user) => {
+    const fromSeed = seed.find((item) => item.id === user.id);
+    const withVerified: User = {
+      ...user,
+      email_verified: user.email_verified ?? true,
+    };
+    if (!fromSeed || !namedRoster.has(user.id)) return withVerified;
+    return {
+      ...withVerified,
+      name: user.name || fromSeed.name,
+      role_name: user.role_name || fromSeed.role_name,
+      role_code: user.role_code || fromSeed.role_code,
+      email: user.email || fromSeed.email,
+    };
+  });
+  const withoutDemo = stripIncompleteSignupUsers(merged)
+    .filter((user) => !isSmokeTestAccount(user))
+    .filter((user) => !RETIRED_DEMO_USER_IDS.has(user.id))
+    .filter((user) => !RETIRED_DEMO_EMAILS.has(user.email.trim().toLowerCase()));
+  return applyCanonicalPeople(withoutDemo);
+}
+
+type CanonicalPerson = {
+  id: string;
+  name: string;
+  email: string;
+  aliases: string[];
+  role_id: string;
+  role_code: string;
+  role_name: string;
+  team_id?: string;
+  team_name: string;
+  team_lead_id?: string;
+  team_lead_name?: string;
+  reporting_manager_id: string;
+  /** Keep the live signup row (by email) instead of the seed id. */
+  preferLiveEmail?: boolean;
+  /** Project Manager stays in management, not a team-member node. */
+  clearTeamId?: boolean;
+};
+
+const CANONICAL_PEOPLE: CanonicalPerson[] = [];
+
+function applyCanonicalPeople(users: User[]): User[] {
+  const remove = new Set<string>();
+  let list = users;
+
+  for (const canon of CANONICAL_PEOPLE) {
+    const emails = new Set([canon.email, ...canon.aliases].map((value) => value.trim().toLowerCase()));
+    const byId = list.find((user) => user.id === canon.id && !remove.has(user.id));
+    const emailMatches = list.filter(
+      (user) => emails.has(user.email.trim().toLowerCase()) && !remove.has(user.id)
+    );
+    const liveEmail = list.find(
+      (user) => user.email.trim().toLowerCase() === canon.email && !remove.has(user.id)
+    );
+    const byEmail = liveEmail || emailMatches[0];
+
+    let keepId: string | undefined;
+    if (canon.preferLiveEmail && byEmail) {
+      keepId = byEmail.id;
+    } else {
+      keepId = byId?.id || byEmail?.id;
+    }
+    if (!keepId) continue;
+    for (const extra of emailMatches) {
+      if (extra.id !== keepId) remove.add(extra.id);
+    }
+    if (byId && byId.id !== keepId) remove.add(byId.id);
+
+    const kept = list.find((user) => user.id === keepId);
+    const donor = emailMatches.find((user) => user.password_hash) || kept;
+    if (!kept) continue;
+
+    list = list.map((user) => {
+      if (user.id !== keepId) return user;
+      const next: User = {
+        ...user,
+        name: canon.name,
+        email: canon.email,
+        role_id: canon.role_id,
+        role_code: canon.role_code,
+        role_name: canon.role_name,
+        team_name: canon.team_name,
+        reporting_manager_id: user.reporting_manager_id || canon.reporting_manager_id,
+        password_hash: donor?.password_hash || user.password_hash,
+        password_created_at: donor?.password_created_at || user.password_created_at,
+      };
+      if (canon.clearTeamId) {
+        delete next.team_id;
+        delete next.team_lead_id;
+        delete next.team_lead_name;
+      } else {
+        next.team_id = canon.team_id;
+        if (canon.team_lead_id) {
+          next.team_lead_id = canon.team_lead_id;
+          next.team_lead_name = canon.team_lead_name;
+        } else {
+          delete next.team_lead_id;
+          delete next.team_lead_name;
+        }
+      }
+      return next;
+    });
+  }
+
+  return list.filter((user) => !remove.has(user.id));
+}
+
+function mergeRoles(stored: Role[] | undefined, seed: Role[]): Role[] {
+  return mergeById(stored, seed).map((role) => {
+    const fromSeed = seed.find((item) => item.id === role.id);
+    return fromSeed ? { ...role, ...fromSeed } : role;
+  });
+}
+
+function alignStoredLead(lead: Lead): Lead {
+  if (lead.status === 'WON') {
+    return { ...lead, status: 'ORDER_CONVERTED', pipeline_stage: 'CONVERTED' };
+  }
+  if (lead.status === 'FEASIBILITY_IN_PROGRESS' && lead.pipeline_stage === 'COSTING') {
+    return { ...lead, status: 'COSTING_IN_PROGRESS' };
+  }
+  if (lead.status === 'FEASIBILITY_IN_PROGRESS' && lead.pipeline_stage === 'QUOTATION') {
+    return { ...lead, status: 'QUOTATION' };
+  }
+  if (lead.status === 'FEASIBILITY_IN_PROGRESS' && lead.pipeline_stage === 'NEGOTIATION') {
+    return { ...lead, status: 'NEGOTIATION' };
+  }
+  return lead;
+}
+
+function normalizeLeads(stored: Lead[] | undefined): Lead[] {
+  return (stored ?? []).map(alignStoredLead);
+}
+
+function mergeTeams(stored: Team[] | undefined, seed: Team[]): Team[] {
+  const base = stored?.length ? stored : seed;
+  return mergeById(base, seed).map((team) => {
+    const fromSeed = seed.find((item) => item.id === team.id);
+    if (!fromSeed) return team;
+    return {
+      ...team,
+      name: fromSeed.name,
+      code: fromSeed.code,
+      description: fromSeed.description,
+      team_lead_id: team.team_lead_id,
+      team_lead_name: team.team_lead_name || 'Not Assigned',
+    };
+  });
+}
+
+function refreshTeamCounts(db: DbShape): DbShape {
+  db.teams = db.teams.map((team) => ({
+    ...team,
+    member_count: db.users.filter((user) => user.team_id === team.id && user.status === 'ACTIVE').length,
+  }));
+  return db;
+}
+
+export function isLeadershipKeepUser(user: User): boolean {
+  const email = user.email.trim().toLowerCase();
+  const name = user.name.trim().toLowerCase();
+  if (user.role_code === 'CEO' || user.id === 'u-ceo') return true;
+  if (user.id === 'u-bh' || email.includes('shradha') || name.includes('shradha') || name.includes('sharadha')) return true;
+  if (
+    user.role_code === 'ENG_DIRECTOR' ||
+    user.id === 'u-ed' ||
+    email.startsWith('engg.director@') ||
+    name.includes('sabagiri') ||
+    name.includes('sabarigiri')
+  ) {
+    return true;
+  }
+  return false;
+}
+
+function isLeadershipPruned(parsed: Partial<DbShape>): boolean {
+  return (parsed.systemMeta ?? []).some(
+    (item) => item.id === LEADERSHIP_PRUNE_META_ID && Boolean(item.usersLeadershipPrunedAt)
+  );
+}
+
+export function pruneUsersToLeadership(db: DbShape): { db: DbShape; removed: User[] } {
+  const removed = db.users.filter((user) => !isLeadershipKeepUser(user));
+  const kept = db.users.filter(isLeadershipKeepUser);
+  const keepIds = new Set(kept.map((user) => user.id));
+  db.users = kept;
+  db.pendingSignups = [];
+  db.teams = db.teams.map((team) =>
+    team.team_lead_id && !keepIds.has(team.team_lead_id)
+      ? { ...team, team_lead_id: undefined, team_lead_name: 'Not Assigned' }
+      : team
+  );
+  const withoutFlag = (db.systemMeta ?? []).filter((item) => item.id !== LEADERSHIP_PRUNE_META_ID);
+  db.systemMeta = [
+    ...withoutFlag,
+    { id: LEADERSHIP_PRUNE_META_ID, usersLeadershipPrunedAt: new Date().toISOString() },
+  ];
+  return { db: refreshTeamCounts(db), removed };
+}
+
+function emptyDb(): DbShape {
+  return {
+    users: [],
+    roles: [],
+    teams: [],
+    leads: [],
+    projects: [],
+    escalations: [],
+    procurementRequests: [],
+    audits: [],
+    notifications: [],
+    tasks: [],
+    dailyUpdates: [],
+    leadDocuments: [],
+    leadComments: [],
+    leadActivities: [],
+    leadStatusHistory: [],
+    feasibilityTeamAssignments: [],
+    feasibilityEmployeeAllocations: [],
+    projectPhases: [],
+    conversations: [],
+    conversationParticipants: [],
+    chatMessages: [],
+    entityDocuments: [],
+    stageTransitions: [],
+    outboundEmails: [],
+    forumPosts: [],
+    forumComments: [],
+    forumReactions: [],
+    forumTags: [],
+    forumLiveMessages: [],
+    assignmentHistory: [],
+    notificationDeliveries: [],
+    pendingSignups: [],
+    systemMeta: [],
+  };
+}
+
+function readLocalDbFile(): Partial<DbShape> | null {
+  if (!fs.existsSync(localDbPath)) return null;
+  try {
+    return JSON.parse(fs.readFileSync(localDbPath, 'utf8')) as Partial<DbShape>;
+  } catch {
+    return null;
+  }
+}
+
+function collectionsHaveData(parsed: Partial<DbShape> | Record<CollectionName, unknown[]>): boolean {
+  return COLLECTION_NAMES.some((name) => {
+    const value = (parsed as Record<string, unknown[]>)[name];
+    return Array.isArray(value) && value.length > 0;
+  });
+}
+
+function buildMergedDb(parsed: Partial<DbShape>): DbShape {
+  return refreshTeamCounts({
+    users: mergeUsers(parsed.users, []),
+    roles: mergeRoles(parsed.roles, INITIAL_ROLES),
+    teams: mergeTeams(parsed.teams, INITIAL_TEAMS),
+    leads: normalizeLeads(parsed.leads),
+    projects: parsed.projects ?? [],
+    escalations: parsed.escalations ?? [],
+    procurementRequests: parsed.procurementRequests ?? [],
+    audits: parsed.audits ?? [],
+    notifications: parsed.notifications ?? [],
+    tasks: parsed.tasks ?? [],
+    dailyUpdates: parsed.dailyUpdates ?? [],
+    leadDocuments: parsed.leadDocuments ?? [],
+    leadComments: parsed.leadComments ?? [],
+    leadActivities: parsed.leadActivities ?? [],
+    leadStatusHistory: parsed.leadStatusHistory ?? [],
+    feasibilityTeamAssignments: parsed.feasibilityTeamAssignments ?? [],
+    feasibilityEmployeeAllocations: parsed.feasibilityEmployeeAllocations ?? [],
+    projectPhases: parsed.projectPhases ?? [],
+    conversations: parsed.conversations ?? [],
+    conversationParticipants: parsed.conversationParticipants ?? [],
+    chatMessages: parsed.chatMessages ?? [],
+    entityDocuments: parsed.entityDocuments ?? [],
+    stageTransitions: parsed.stageTransitions ?? [],
+    outboundEmails: parsed.outboundEmails ?? [],
+    forumPosts: parsed.forumPosts ?? [],
+    forumComments: parsed.forumComments ?? [],
+    forumReactions: parsed.forumReactions ?? [],
+    forumTags: parsed.forumTags ?? [],
+    forumLiveMessages: parsed.forumLiveMessages ?? [],
+    assignmentHistory: parsed.assignmentHistory ?? [],
+    notificationDeliveries: parsed.notificationDeliveries ?? [],
+    pendingSignups: (parsed.pendingSignups ?? []).filter((item) => !isSmokeTestAccount(item)),
+    systemMeta: parsed.systemMeta?.length
+      ? parsed.systemMeta
+      : [{ id: LIVE_META_ID, demoOperationalPurgedAt: new Date().toISOString() }],
+  });
+}
+
+function toCollections(db: DbShape): Record<CollectionName, unknown[]> {
+  const out = {} as Record<CollectionName, unknown[]>;
+  for (const name of COLLECTION_NAMES) {
+    out[name] = (db[name] as unknown[]) ?? [];
+  }
+  return out;
+}
+
+function countRecords(db: DbShape): Record<string, number> {
+  const counts: Record<string, number> = {};
+  for (const name of COLLECTION_NAMES) {
+    counts[name] = db[name]?.length ?? 0;
+  }
+  return counts;
+}
+
+async function persistDb(db: DbShape, names?: CollectionName[]): Promise<void> {
+  if (names) {
+    if (!names.length) return;
+    await saveAllCollections(toCollections(db), names);
+    return;
+  }
+  await saveAllCollections(toCollections(db));
+}
+
+function enqueuePersist(db: DbShape): void {
+  const names = takeDirty();
+  if (!names.length) return;
+  writeChain = writeChain
+    .then(() => persistDb(db, names))
+    .catch((error) => {
+      console.error('[store] Failed to persist to Postgres:', error);
+    });
+}
+
+function loadDb(): DbShape {
+  if (!cache) {
+    throw new Error('Store not initialized. Call initStore() before handling requests.');
+  }
+  return cache;
+}
+
+function saveDb(db: DbShape) {
+  cache = db;
+  if (!persistPaused) enqueuePersist(db);
+}
+
+export async function transact<T>(fn: () => T | Promise<T>): Promise<T> {
+  const run = mutex.then(async () => {
+    await writeChain;
+    const snapshot = snapshotDb(loadDb());
+    persistPaused = true;
+    try {
+      const result = await fn();
+      persistPaused = false;
+      await persistDb(loadDb(), takeDirty());
+      return result;
+    } catch (error) {
+      cache = snapshot;
+      dirtyCollections.clear();
+      persistPaused = false;
+      throw error;
+    } finally {
+      persistPaused = false;
+    }
+  });
+  mutex = run.then(
+    () => undefined,
+    () => undefined
+  );
+  return run;
+}
+
+export async function initStore(options?: { forceImportLocal?: boolean }): Promise<{
+  source: 'postgres' | 'local-db.json' | 'seed';
+  counts: Record<string, number>;
+}> {
+  await pingDatabase();
+  await ensureSchema();
+
+  const fromPostgres = await loadAllCollections();
+  const postgresHasData = collectionsHaveData(fromPostgres);
+  const localFile = readLocalDbFile();
+  const localHasData = Boolean(localFile && collectionsHaveData(localFile));
+
+  let source: 'postgres' | 'local-db.json' | 'seed' = 'seed';
+  let parsed: Partial<DbShape> = emptyDb();
+
+  if (options?.forceImportLocal && localHasData && localFile) {
+    parsed = localFile;
+    source = 'local-db.json';
+  } else if (postgresHasData) {
+    parsed = fromPostgres as Partial<DbShape>;
+    source = 'postgres';
+  } else if (localHasData && localFile) {
+    parsed = localFile;
+    source = 'local-db.json';
+  } else {
+    parsed = {
+      users: [],
+      roles: INITIAL_ROLES,
+      teams: INITIAL_TEAMS,
+    };
+    source = 'seed';
+  }
+
+  parsed = prepareLiveOperationalData(parsed);
+  console.info('[store] Live production mode enabled (operational demo seed is not merged)');
+
+  const merged = buildMergedDb(parsed);
+  const removedIncomplete = (parsed.users ?? []).filter(isIncompleteSignupAccount).length;
+  if (removedIncomplete) {
+    console.info('[store] Removed incomplete signup accounts from users', { removed: removedIncomplete });
+  }
+
+  if (!isLeadershipPruned(merged)) {
+    const withoutFlag = (merged.systemMeta ?? []).filter((item) => item.id !== LEADERSHIP_PRUNE_META_ID);
+    merged.systemMeta = [
+      ...withoutFlag,
+      { id: LEADERSHIP_PRUNE_META_ID, usersLeadershipPrunedAt: new Date().toISOString() },
+    ];
+  }
+
+  cache = merged;
+  await persistDb(merged);
+  initialized = true;
+
+  return { source, counts: countRecords(loadDb()) };
+}
+
+export async function flushStore(): Promise<void> {
+  await writeChain;
+}
+
+export async function shutdownStore(): Promise<void> {
+  await flushStore();
+  await closePool();
+  initialized = false;
+  cache = null;
+}
+
+export function isStoreInitialized(): boolean {
+  return initialized;
+}
+
+export const store = {
+  getUsers(): User[] {
+    return loadDb().users;
+  },
+  getRoles(): Role[] {
+    return loadDb().roles;
+  },
+  getTeams(): Team[] {
+    return loadDb().teams;
+  },
+  saveTeams(teams: Team[]) {
+    const db = loadDb();
+    db.teams = teams;
+    refreshTeamCounts(db);
+    markDirty('teams');
+    saveDb(db);
+  },
+  getLeads(): Lead[] {
+    return loadDb().leads;
+  },
+  getProjects(): Project[] {
+    return loadDb().projects;
+  },
+  getEscalations(): Escalation[] {
+    return loadDb().escalations;
+  },
+  getProcurementRequests(): ProcurementRequest[] {
+    return loadDb().procurementRequests;
+  },
+  getAudits(): AuditLog[] {
+    return loadDb().audits;
+  },
+  getNotifications(): NotificationItem[] {
+    return loadDb().notifications;
+  },
+  getTasks(): Task[] {
+    return loadDb().tasks;
+  },
+  getDailyUpdates(): DailyUpdate[] {
+    return loadDb().dailyUpdates;
+  },
+  findUserByEmail(email: string): User | undefined {
+    const normalized = email.trim().toLowerCase();
+    return this.getUsers().find((user) => user.email.toLowerCase() === normalized);
+  },
+  findUserById(id: string): User | undefined {
+    return this.getUsers().find((user) => user.id === id);
+  },
+  getPendingSignups(): PendingSignup[] {
+    return loadDb().pendingSignups ?? [];
+  },
+  findPendingSignupByEmail(email: string): PendingSignup | undefined {
+    const normalized = email.trim().toLowerCase();
+    return this.getPendingSignups().find((item) => item.email.toLowerCase() === normalized);
+  },
+  findPendingSignupById(id: string): PendingSignup | undefined {
+    return this.getPendingSignups().find((item) => item.id === id);
+  },
+  savePendingSignup(pending: PendingSignup) {
+    const db = loadDb();
+    const email = pending.email.trim().toLowerCase();
+    const next = (db.pendingSignups ?? []).filter(
+      (item) => item.id !== pending.id && item.email.toLowerCase() !== email
+    );
+    next.unshift({ ...pending, email });
+    db.pendingSignups = next;
+    markDirty('pendingSignups');
+    saveDb(db);
+  },
+  deletePendingSignup(id: string) {
+    const db = loadDb();
+    db.pendingSignups = (db.pendingSignups ?? []).filter((item) => item.id !== id);
+    markDirty('pendingSignups');
+    saveDb(db);
+  },
+  saveUsers(users: User[]) {
+    const db = loadDb();
+    db.users = stripIncompleteSignupUsers(users).filter((user) => !isSmokeTestAccount(user));
+    refreshTeamCounts(db);
+    markDirty('users', 'teams');
+    saveDb(db);
+  },
+  saveLeads(leads: Lead[]) {
+    const db = loadDb();
+    db.leads = leads;
+    markDirty('leads');
+    saveDb(db);
+  },
+  saveProjects(projects: Project[]) {
+    const db = loadDb();
+    db.projects = projects;
+    markDirty('projects');
+    saveDb(db);
+  },
+  saveEscalations(escalations: Escalation[]) {
+    const db = loadDb();
+    db.escalations = escalations;
+    markDirty('escalations');
+    saveDb(db);
+  },
+  saveAudits(audits: AuditLog[]) {
+    const db = loadDb();
+    db.audits = audits;
+    markDirty('audits');
+    saveDb(db);
+  },
+  saveNotifications(notifications: NotificationItem[]) {
+    const db = loadDb();
+    db.notifications = notifications;
+    markDirty('notifications');
+    saveDb(db);
+  },
+  saveTasks(tasks: Task[]) {
+    const db = loadDb();
+    db.tasks = tasks;
+    markDirty('tasks');
+    saveDb(db);
+  },
+  saveDailyUpdates(dailyUpdates: DailyUpdate[]) {
+    const db = loadDb();
+    db.dailyUpdates = dailyUpdates;
+    markDirty('dailyUpdates');
+    saveDb(db);
+  },
+  getLeadDocuments(): LeadDocument[] {
+    return loadDb().leadDocuments ?? [];
+  },
+  saveLeadDocuments(leadDocuments: LeadDocument[]) {
+    const db = loadDb();
+    db.leadDocuments = leadDocuments;
+    markDirty('leadDocuments');
+    saveDb(db);
+  },
+  getLeadComments(): LeadComment[] {
+    return loadDb().leadComments ?? [];
+  },
+  saveLeadComments(leadComments: LeadComment[]) {
+    const db = loadDb();
+    db.leadComments = leadComments;
+    markDirty('leadComments');
+    saveDb(db);
+  },
+  getLeadActivities(): LeadActivity[] {
+    return loadDb().leadActivities ?? [];
+  },
+  saveLeadActivities(leadActivities: LeadActivity[]) {
+    const db = loadDb();
+    db.leadActivities = leadActivities;
+    markDirty('leadActivities');
+    saveDb(db);
+  },
+  getLeadStatusHistory(): LeadStatusHistory[] {
+    return loadDb().leadStatusHistory ?? [];
+  },
+  saveLeadStatusHistory(leadStatusHistory: LeadStatusHistory[]) {
+    const db = loadDb();
+    db.leadStatusHistory = leadStatusHistory;
+    markDirty('leadStatusHistory');
+    saveDb(db);
+  },
+  getFeasibilityTeamAssignments(): FeasibilityTeamAssignment[] {
+    return loadDb().feasibilityTeamAssignments ?? [];
+  },
+  saveFeasibilityTeamAssignments(feasibilityTeamAssignments: FeasibilityTeamAssignment[]) {
+    const db = loadDb();
+    db.feasibilityTeamAssignments = feasibilityTeamAssignments;
+    markDirty('feasibilityTeamAssignments');
+    saveDb(db);
+  },
+  getFeasibilityEmployeeAllocations(): FeasibilityEmployeeAllocation[] {
+    return loadDb().feasibilityEmployeeAllocations ?? [];
+  },
+  saveFeasibilityEmployeeAllocations(feasibilityEmployeeAllocations: FeasibilityEmployeeAllocation[]) {
+    const db = loadDb();
+    db.feasibilityEmployeeAllocations = feasibilityEmployeeAllocations;
+    markDirty('feasibilityEmployeeAllocations');
+    saveDb(db);
+  },
+  getProjectPhases(): ProjectPhase[] {
+    return loadDb().projectPhases ?? [];
+  },
+  saveProjectPhases(projectPhases: ProjectPhase[]) {
+    const db = loadDb();
+    db.projectPhases = projectPhases;
+    markDirty('projectPhases');
+    saveDb(db);
+  },
+  getConversations(): Conversation[] {
+    return loadDb().conversations ?? [];
+  },
+  saveConversations(conversations: Conversation[]) {
+    const db = loadDb();
+    db.conversations = conversations;
+    markDirty('conversations');
+    saveDb(db);
+  },
+  getConversationParticipants(): ConversationParticipant[] {
+    return loadDb().conversationParticipants ?? [];
+  },
+  saveConversationParticipants(conversationParticipants: ConversationParticipant[]) {
+    const db = loadDb();
+    db.conversationParticipants = conversationParticipants;
+    markDirty('conversationParticipants');
+    saveDb(db);
+  },
+  getChatMessages(): ChatMessage[] {
+    return loadDb().chatMessages ?? [];
+  },
+  saveChatMessages(chatMessages: ChatMessage[]) {
+    const db = loadDb();
+    db.chatMessages = chatMessages;
+    markDirty('chatMessages');
+    saveDb(db);
+  },
+  getEntityDocuments(): EntityDocument[] {
+    return loadDb().entityDocuments ?? [];
+  },
+  saveEntityDocuments(entityDocuments: EntityDocument[]) {
+    const db = loadDb();
+    db.entityDocuments = entityDocuments;
+    markDirty('entityDocuments');
+    saveDb(db);
+  },
+  getStageTransitions(): StageTransition[] {
+    return loadDb().stageTransitions ?? [];
+  },
+  saveStageTransitions(stageTransitions: StageTransition[]) {
+    const db = loadDb();
+    db.stageTransitions = stageTransitions;
+    markDirty('stageTransitions');
+    saveDb(db);
+  },
+  getOutboundEmails(): OutboundEmail[] {
+    return loadDb().outboundEmails ?? [];
+  },
+  saveOutboundEmails(outboundEmails: OutboundEmail[]) {
+    const db = loadDb();
+    db.outboundEmails = outboundEmails;
+    markDirty('outboundEmails');
+    saveDb(db);
+  },
+  getSystemMeta() {
+    return loadDb().systemMeta ?? [];
+  },
+  saveSystemMeta(systemMeta: Array<{
+    id: string;
+    demoOperationalPurgedAt?: string;
+    usersLeadershipPrunedAt?: string;
+    payloadType?: string;
+    payload?: unknown;
+  }>) {
+    const db = loadDb();
+    db.systemMeta = systemMeta;
+    markDirty('systemMeta');
+    saveDb(db);
+  },
+  getForumPosts(): ForumPost[] {
+    return loadDb().forumPosts ?? [];
+  },
+  saveForumPosts(forumPosts: ForumPost[]) {
+    const db = loadDb();
+    db.forumPosts = forumPosts;
+    markDirty('forumPosts');
+    saveDb(db);
+  },
+  getForumComments(): ForumComment[] {
+    return loadDb().forumComments ?? [];
+  },
+  saveForumComments(forumComments: ForumComment[]) {
+    const db = loadDb();
+    db.forumComments = forumComments;
+    markDirty('forumComments');
+    saveDb(db);
+  },
+  getForumReactions(): ForumReaction[] {
+    return loadDb().forumReactions ?? [];
+  },
+  saveForumReactions(forumReactions: ForumReaction[]) {
+    const db = loadDb();
+    db.forumReactions = forumReactions;
+    markDirty('forumReactions');
+    saveDb(db);
+  },
+  getForumTags(): ForumTag[] {
+    return loadDb().forumTags ?? [];
+  },
+  saveForumTags(forumTags: ForumTag[]) {
+    const db = loadDb();
+    db.forumTags = forumTags;
+    markDirty('forumTags');
+    saveDb(db);
+  },
+  getForumLiveMessages(): ForumLiveMessage[] {
+    return loadDb().forumLiveMessages ?? [];
+  },
+  saveForumLiveMessages(forumLiveMessages: ForumLiveMessage[]) {
+    const db = loadDb();
+    db.forumLiveMessages = forumLiveMessages;
+    markDirty('forumLiveMessages');
+    saveDb(db);
+  },
+  getAssignmentHistory(): AssignmentHistory[] {
+    return loadDb().assignmentHistory ?? [];
+  },
+  saveAssignmentHistory(assignmentHistory: AssignmentHistory[]) {
+    const db = loadDb();
+    db.assignmentHistory = assignmentHistory;
+    markDirty('assignmentHistory');
+    saveDb(db);
+  },
+  getNotificationDeliveries(): NotificationDelivery[] {
+    return loadDb().notificationDeliveries ?? [];
+  },
+  saveNotificationDeliveries(notificationDeliveries: NotificationDelivery[]) {
+    const db = loadDb();
+    db.notificationDeliveries = notificationDeliveries;
+    markDirty('notificationDeliveries');
+    saveDb(db);
+  },
+  appendAudit(entry: Omit<AuditLog, 'id' | 'created_at'>): AuditLog {
+    const audits = this.getAudits();
+    const log: AuditLog = {
+      ...entry,
+      id: `log-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      created_at: new Date().toISOString(),
+    };
+    audits.unshift(log);
+    this.saveAudits(audits);
+    return log;
+  },
+  appendNotification(entry: Omit<NotificationItem, 'id' | 'created_at' | 'read_status'>): NotificationItem {
+    const notifications = this.getNotifications();
+    const item: NotificationItem = {
+      ...entry,
+      id: `notif-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      read_status: false,
+      created_at: new Date().toISOString(),
+    };
+    notifications.unshift(item);
+    this.saveNotifications(notifications);
+    return item;
+  },
+};

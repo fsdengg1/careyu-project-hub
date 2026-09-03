@@ -1,0 +1,665 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    color-scheme: dark;
+    --bg-main: #0B0F17;
+    --card-bg: #131B2A;
+    --border-color: #1E293B;
+    --lead-task-bg: rgba(139, 92, 246, 0.12);
+    --lead-task-border: rgba(167, 139, 250, 0.38);
+    --lead-task-badge-bg: rgba(139, 92, 246, 0.22);
+    --lead-task-badge-fg: #ddd6fe;
+    --lead-task-accent: #c4b5fd;
+  }
+
+  html.dark {
+    color-scheme: dark;
+  }
+
+  html.light {
+    color-scheme: light;
+  }
+
+  /* Native date/time popups follow the input's color-scheme, not the page chrome.
+     Keep them dark in dark mode even when they sit on the light Excel-style sheet. */
+  html.dark :is(input[type="date"], input[type="datetime-local"], input[type="time"], input[type="month"], input[type="week"]) {
+    color-scheme: dark;
+  }
+
+  html.light :is(input[type="date"], input[type="datetime-local"], input[type="time"], input[type="month"], input[type="week"]) {
+    color-scheme: light;
+  }
+
+  html.light .theme-app {
+    --bg-main: #F4F7FB;
+    --card-bg: #FFFFFF;
+    --border-color: #E2E8F0;
+    --lead-task-bg: rgba(109, 40, 217, 0.06);
+    --lead-task-border: rgba(109, 40, 217, 0.18);
+    --lead-task-badge-bg: rgba(109, 40, 217, 0.1);
+    --lead-task-badge-fg: #5b21b6;
+    --lead-task-accent: #6d28d9;
+
+    --color-slate-50: #020617;
+    --color-slate-100: #0f172a;
+    --color-slate-200: #1e293b;
+    --color-slate-300: #334155;
+    --color-slate-400: #475569;
+    --color-slate-500: #64748b;
+    --color-slate-600: #94a3b8;
+    --color-slate-700: #cbd5e1;
+    --color-slate-800: #e2e8f0;
+    --color-slate-900: #ffffff;
+    --color-slate-950: #f4f7fb;
+
+    --color-cyan-50: #083344;
+    --color-cyan-100: #164e63;
+    --color-cyan-200: #155e75;
+    --color-cyan-300: #0e7490;
+    --color-cyan-400: #0e7490;
+    --color-cyan-500: #0891b2;
+    --color-cyan-600: #0e7490;
+    --color-cyan-700: #155e75;
+    --color-cyan-800: #67e8f9;
+    --color-cyan-900: #a5f3fc;
+    --color-cyan-950: #ecfeff;
+
+    --color-rose-200: #9f1239;
+    --color-rose-300: #be123c;
+    --color-rose-400: #e11d48;
+    --color-rose-800: #fda4af;
+    --color-rose-900: #fecdd3;
+    --color-rose-950: #fff1f2;
+
+    --color-amber-200: #92400e;
+    --color-amber-300: #b45309;
+    --color-amber-400: #d97706;
+    --color-amber-800: #fcd34d;
+    --color-amber-900: #fde68a;
+    --color-amber-950: #fffbeb;
+
+    --color-emerald-200: #065f46;
+    --color-emerald-300: #047857;
+    --color-emerald-400: #059669;
+    --color-emerald-500: #047857;
+    --color-emerald-800: #6ee7b7;
+    --color-emerald-900: #a7f3d0;
+    --color-emerald-950: #d1fae5;
+
+    --color-blue-200: #1e40af;
+    --color-blue-300: #1d4ed8;
+    --color-blue-400: #2563eb;
+    --color-blue-800: #93c5fd;
+    --color-blue-900: #bfdbfe;
+    --color-blue-950: #eff6ff;
+
+    --color-indigo-200: #3730a3;
+    --color-indigo-300: #4338ca;
+    --color-indigo-400: #4f46e5;
+    --color-indigo-800: #a5b4fc;
+    --color-indigo-900: #c7d2fe;
+    --color-indigo-950: #eef2ff;
+
+    --color-orange-200: #9a3412;
+    --color-orange-300: #c2410c;
+    --color-orange-400: #ea580c;
+    --color-orange-800: #fdba74;
+    --color-orange-900: #fed7aa;
+    --color-orange-950: #fff7ed;
+
+    --color-violet-200: #5b21b6;
+    --color-violet-300: #6d28d9;
+    --color-violet-400: #7c3aed;
+    --color-violet-800: #c4b5fd;
+    --color-violet-900: #ddd6fe;
+    --color-violet-950: #f5f3ff;
+
+    --color-sky-200: #075985;
+    --color-sky-300: #0369a1;
+    --color-sky-400: #0284c7;
+    --color-sky-800: #7dd3fc;
+    --color-sky-900: #bae6fd;
+    --color-sky-950: #f0f9ff;
+  }
+}
+
+/* Pale text tokens used on inverted dark-theme cards must stay dark in light mode. */
+html.light .theme-app :is(.text-cyan-100, .text-cyan-100\/80) {
+  color: #155e75;
+}
+html.light .theme-app .text-emerald-100 {
+  color: #047857;
+}
+html.light .theme-app .text-rose-100 {
+  color: #be123c;
+}
+html.light .theme-app .text-amber-100 {
+  color: #b45309;
+}
+html.light .theme-app .text-indigo-100 {
+  color: #4338ca;
+}
+html.light .theme-app .text-blue-100 {
+  color: #1d4ed8;
+}
+html.light .theme-app .text-violet-100 {
+  color: #6d28d9;
+}
+
+/* Light-first success/error copy uses *-800 as text; keep it dark while borders stay tinted. */
+html.light .theme-app .text-emerald-800 {
+  color: #065f46;
+}
+html.light .theme-app .text-rose-800 {
+  color: #9f1239;
+}
+html.light .theme-app .text-amber-800 {
+  color: #92400e;
+}
+html.light .theme-app .text-cyan-800 {
+  color: #155e75;
+}
+html.light .theme-app .text-blue-800 {
+  color: #1e40af;
+}
+
+/* Official Care Yu Automation lockup — full artwork, no cropped icon overlay */
+.careyu-lockup {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+}
+
+.careyu-lockup--on-light {
+  padding: 0.22rem 0.4rem;
+  border-radius: 0.65rem;
+  background: #ffffff;
+  box-shadow: 0 0 0 1px rgba(15, 23, 42, 0.06);
+}
+
+/* On navy brand panels: tight light plate so PNG artwork stays readable without a huge white slab */
+.careyu-lockup--on-dark {
+  padding: 0.35rem 0.55rem;
+  border-radius: 0.75rem;
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
+}
+
+.careyu-logo-img {
+  display: block;
+  height: 2.55rem;
+  width: auto;
+  max-width: min(190px, 100%);
+  object-fit: contain;
+}
+
+.careyu-lockup--on-dark .careyu-logo-img {
+  height: 2.35rem;
+  max-width: min(180px, 100%);
+}
+
+.auth-signup-logo.careyu-lockup--on-dark .careyu-logo-img {
+  height: auto;
+  width: 172px;
+  max-width: 172px;
+}
+
+.careyu-lockup--compact .careyu-logo-img {
+  height: 2.05rem;
+  max-width: min(160px, 100%);
+}
+
+.auth-brand-logo.careyu-lockup--on-dark {
+  padding: 0.4rem 0.65rem;
+}
+
+.auth-brand-logo .careyu-logo-img {
+  height: 2.5rem;
+  max-width: 186px;
+}
+
+.app-sidebar {
+  width: 310px;
+  transition: width 250ms ease-in-out;
+  z-index: 50;
+}
+
+.app-sidebar--collapsed {
+  width: 68px;
+}
+
+.sidebar-logo-mark .careyu-logo-img {
+  height: 1.65rem;
+  max-width: 44px;
+}
+
+@media (max-width: 1023px) {
+  .app-sidebar--mobile {
+    position: fixed;
+    left: 0;
+    top: 0;
+    transform: translateX(-100%);
+    width: 310px;
+    transition: transform 250ms ease-in-out;
+  }
+
+  .app-sidebar--mobile.app-sidebar--mobile-open {
+    transform: translateX(0);
+  }
+}
+
+html.light .theme-app ::-webkit-scrollbar-track {
+  background: #eef2f7;
+}
+
+html.light .theme-app ::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+}
+
+html.light .theme-app ::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}
+
+/* Custom scrollbar for enterprise table and sidebar views */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: #090D16;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #1E293B;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #334155;
+}
+
+.daily-status-workspace {
+  background: #ffffff;
+  color: #0f172a;
+  border: 1px solid #cbd5e1;
+  display: flex;
+  flex-direction: column;
+  min-height: calc(100vh - 210px);
+  min-width: 0;
+}
+
+.daily-status-workspace-readonly {
+  min-height: 420px;
+}
+
+.daily-status-table-wrap {
+  flex: 1 1 auto;
+  min-height: 280px;
+  min-width: 0;
+  overflow: auto;
+}
+
+.daily-status-sheet {
+  width: 100%;
+  min-width: 1748px;
+  border-collapse: collapse;
+  table-layout: fixed;
+  background: #ffffff;
+  color: #0f172a;
+}
+
+.daily-status-sheet col.col-check {
+  width: 36px;
+}
+
+.daily-status-sheet col.col-person {
+  width: 108px;
+}
+
+.daily-status-sheet col.col-project {
+  width: 200px;
+}
+
+.daily-status-sheet col.col-task-desc {
+  width: 460px;
+}
+
+.daily-status-sheet col.col-deps {
+  width: 150px;
+}
+
+.daily-status-sheet col.col-status {
+  width: 132px;
+}
+
+.daily-status-sheet col.col-date,
+.daily-status-sheet col.col-deadline {
+  width: 128px;
+}
+
+.daily-status-sheet col.col-hours {
+  width: 120px;
+}
+
+.daily-status-sheet col.col-delay {
+  width: 160px;
+}
+
+.daily-status-sheet col.col-actions {
+  width: 44px;
+}
+
+.daily-status-sheet.daily-status-compare {
+  width: 100%;
+  min-width: 0;
+  table-layout: fixed;
+}
+
+.daily-status-compare-wrap .daily-status-compare-scroll {
+  overflow-x: hidden;
+}
+
+.daily-status-sheet.daily-status-compare th,
+.daily-status-sheet.daily-status-compare td {
+  font-size: 11px;
+  padding: 6px 6px;
+  white-space: normal;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+}
+
+.daily-status-sheet.daily-status-compare .hours-cell,
+.daily-status-sheet.daily-status-compare .status-cell {
+  white-space: normal;
+  text-align: center;
+}
+
+.daily-status-sheet th {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  background: #facc15;
+  color: #0f172a;
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  text-align: center;
+  vertical-align: middle;
+  border: 1px solid #d4a017;
+  padding: 10px 12px;
+  white-space: nowrap;
+}
+
+.daily-status-sheet td {
+  border: 1px solid #d8dee6;
+  padding: 8px 10px;
+  vertical-align: top;
+  font-size: 12px;
+  color: #0f172a;
+  background: #ffffff;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  line-height: 1.45;
+}
+
+.daily-status-sheet tbody tr:nth-child(even) td:not(.tone-cell):not(.person-cell) {
+  background: #f8fafc;
+}
+
+.daily-status-sheet tbody tr:hover td:not(.tone-cell):not(.person-cell) {
+  background: #eef6ff;
+}
+
+.daily-status-sheet tbody tr.lead-task td:not(.tone-cell) {
+  background: var(--lead-task-bg) !important;
+}
+
+.daily-status-sheet tbody tr.lead-task:hover td:not(.tone-cell) {
+  background: color-mix(in srgb, var(--lead-task-bg) 80%, #eef6ff) !important;
+}
+
+.daily-status-sheet td.person-cell {
+  font-weight: 600;
+  text-align: center;
+  vertical-align: middle;
+  background: #fffef6;
+  padding-inline: 6px;
+}
+
+.daily-status-sheet td.project-cell {
+  min-width: 200px;
+}
+
+.daily-status-sheet td.task-desc-cell {
+  min-width: 460px;
+}
+
+.daily-status-sheet td.deps-cell {
+  min-width: 150px;
+}
+
+.daily-status-sheet td.status-cell {
+  min-width: 132px;
+  white-space: nowrap;
+  text-align: center;
+  vertical-align: middle;
+  word-break: normal;
+  overflow-wrap: normal;
+}
+
+.daily-status-sheet td.date-cell {
+  min-width: 128px;
+  white-space: nowrap;
+  text-align: center;
+  vertical-align: middle;
+  word-break: normal;
+  overflow-wrap: normal;
+}
+
+/* Deadline tones — must beat `.daily-status-sheet td { background }` (mail uses the same colors inline). */
+.daily-status-sheet td.tone-cell.tone-completed {
+  background: #dcfce7 !important;
+  color: #166534 !important;
+  font-weight: 700;
+}
+
+.daily-status-sheet td.tone-cell.tone-hold {
+  background: #fde68a !important;
+  color: #78350f !important;
+  font-weight: 700;
+}
+
+.daily-status-sheet td.tone-cell.tone-delay-1 {
+  background: #dc2626 !important;
+  color: #ffffff !important;
+  font-weight: 700;
+}
+
+.daily-status-sheet td.tone-cell.tone-delay-2plus {
+  background: #0f172a !important;
+  color: #ffffff !important;
+  font-weight: 700;
+}
+
+.daily-status-sheet td.tone-cell.tone-delay-1 .sheet-input,
+.daily-status-sheet td.tone-cell.tone-delay-2plus .sheet-input {
+  color: inherit;
+  font-weight: inherit;
+}
+
+.daily-status-sheet td.tone-cell.tone-completed .sheet-input,
+.daily-status-sheet td.tone-cell.tone-hold .sheet-input {
+  color: inherit;
+  font-weight: inherit;
+}
+
+.daily-status-sheet td.hours-cell {
+  min-width: 120px;
+  white-space: nowrap;
+  text-align: center;
+  vertical-align: middle;
+  word-break: normal;
+  overflow-wrap: normal;
+  padding-left: 12px;
+  padding-right: 12px;
+}
+
+.daily-status-sheet td.delay-cell {
+  min-width: 160px;
+  vertical-align: middle;
+}
+
+.daily-status-sheet td.actions-cell {
+  text-align: center;
+  vertical-align: middle;
+  width: 44px;
+}
+
+.daily-status-sheet .sheet-project-field {
+  min-height: 28px;
+  font-weight: 600;
+}
+
+.daily-status-sheet .sheet-task-field {
+  min-height: 56px;
+  line-height: 1.5;
+}
+
+.daily-status-sheet .sheet-date-input {
+  display: block;
+  width: 100%;
+  text-align: center;
+  font-size: 12px;
+  padding: 2px 0;
+  white-space: nowrap;
+}
+
+.daily-status-sheet .sheet-input,
+.daily-status-sheet .sheet-textarea,
+.daily-status-sheet .sheet-select {
+  width: 100%;
+  border: none;
+  background: transparent;
+  color: #0f172a;
+  font: inherit;
+  resize: none;
+  outline: none;
+}
+
+.daily-status-sheet .sheet-textarea {
+  min-height: 38px;
+  line-height: 1.35;
+  overflow: hidden;
+  field-sizing: content;
+}
+
+.daily-status-sheet .sheet-text {
+  display: block;
+  white-space: pre-wrap;
+  line-height: 1.35;
+}
+
+.sheet-dep-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid #cbd5e1;
+  background: #f1f5f9;
+  color: #0f172a;
+  border-radius: 999px;
+  padding: 1px 7px;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 1.4;
+}
+
+.theme-app .form-control {
+  width: 100%;
+  border-radius: 0.375rem;
+  border: 1px solid #1e293b;
+  background-color: #020617;
+  color: #f8fafc;
+  padding: 0.625rem;
+  caret-color: #22d3ee;
+}
+
+.theme-app .form-control::placeholder {
+  color: #64748b;
+}
+
+.theme-app .form-control:focus {
+  outline: none;
+  border-color: #0891b2;
+  box-shadow: 0 0 0 1px #0891b2;
+  color: #f8fafc;
+  background-color: #020617;
+}
+
+.theme-app .form-control:read-only {
+  cursor: not-allowed;
+  color: #94a3b8;
+  background-color: #0f172a;
+}
+
+.theme-app .form-control:-webkit-autofill,
+.theme-app .form-control:-webkit-autofill:focus {
+  -webkit-text-fill-color: #f8fafc;
+  box-shadow: 0 0 0 1000px #020617 inset;
+  transition: background-color 9999s ease-out 0s;
+}
+
+html.light .theme-app .form-control {
+  border-color: #cbd5e1;
+  background-color: #ffffff;
+  color: #0f172a;
+  caret-color: #0891b2;
+}
+
+html.light .theme-app .form-control:focus {
+  color: #0f172a;
+  background-color: #ffffff;
+}
+
+html.light .theme-app .form-control:read-only {
+  color: #64748b;
+  background-color: #f8fafc;
+}
+
+html.light .theme-app .form-control:-webkit-autofill,
+html.light .theme-app .form-control:-webkit-autofill:focus {
+  -webkit-text-fill-color: #0f172a;
+  box-shadow: 0 0 0 1000px #ffffff inset;
+}
+
+.theme-app .auto-grow-textarea {
+  overflow-x: hidden;
+  overflow-y: hidden;
+  resize: none;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+  transition: height 0.18s ease;
+  box-sizing: border-box;
+}
+
+.lead-task {
+  background-color: var(--lead-task-bg);
+  border-color: var(--lead-task-border);
+}
+
+.lead-task-badge {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 999px;
+  border: 1px solid var(--lead-task-border);
+  background: var(--lead-task-badge-bg);
+  color: var(--lead-task-badge-fg);
+  padding: 0.1rem 0.5rem;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
